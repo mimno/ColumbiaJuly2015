@@ -1,0 +1,189 @@
+<html>
+<head>
+<script type="text/javascript" src="d3.v3.min.js"></script>
+<script type="text/javascript" src="xregexp-all-min.js"></script>
+<link href='http://fonts.googleapis.com/css?family=Open+Sans|Old+Standard+TT' rel='stylesheet' type='text/css'>
+<style>
+body { font-family: "Open Sans"; }
+svg { border: solid black 1px; }
+.axis path { fill: none; stroke: black;}
+.axis line { stroke: black; }
+text { font-size: small; font-family: "Open Sans", Calibri; opacity: 0.3; text-anchor: middle; dominant-baseline: central; }
+text:hover { fill: blue; opacity: 1.0; font-weight: bold; font-size: xx-large; }
+</style>
+</head>
+<body>
+
+<div id="plot"></div>
+
+<script>
+
+var height = 600;
+var width = 800;
+var padding = 50;
+
+var countMinMax = [100, 63000];
+
+var svg = d3.select("#plot").append("svg")
+   .attr("height", height).attr("width", width);
+
+// We could use a log scale here, but I'm going to use a linear
+// scale and pass in the log of the probability ratio.
+var xScale = d3.scale.linear()
+  .domain([-4, 4]).range([padding, width - padding]);
+
+// We'll use a log scale on the y axis, so we can see both low-frequency
+// words and high frequency words.
+var yScale = d3.scale.log()
+  .domain(countMinMax).range([height - padding, padding]);
+
+var xAxis = d3.svg.axis().scale(xScale);
+svg.append("g")
+  .attr("class", "axis")
+  .attr("transform", "translate(0, " + yScale(countMinMax[0]) + ")")
+  .call(xAxis);
+
+var yAxis = d3.svg.axis().scale(yScale).orient("left");
+svg.append("g")
+	.attr("class", "axis")
+	.attr("transform", "translate(" + padding + ", 0)")
+	.call(yAxis);
+
+
+var labels = [];
+
+var labelIDs = d3.map();
+var words = [];
+var wordIDs = d3.map();
+
+var wordLabelCounts = {};
+var wordLabelNonZeros = {};
+var labelSums = {};
+var wordSums = {};
+
+var smoothing = 1;
+var logSmoothing = Math.log(smoothing);
+
+var documents = [];
+
+var stopwords = {};
+
+var wordPattern = XRegExp("\\p{L}[\\p{L}\\p{P}]*\\p{L}", "g");
+
+function binaryG2 (n1, n2, total1, total2) {
+	var p1 = n1 / total1;
+	var p2 = n2 / total2;
+	var p = (n1 + n2) / (total1 + total2);
+	
+	return -2 * ( n1 * Math.log(p / p1) + (total1 - n1) * Math.log((1 - p)/(1 - p1)) + 
+				  n2 * Math.log(p / p2) + (total2 - n2) * Math.log((1 - p)/(1 - p2)) );
+}
+
+function parseLine( fields, row ) {
+	// If it's not in [ID]\t[TAG]\t[TEXT] format...
+	if (fields.length != 3) { /* error! */ return; }
+
+	var docID = fields[0];
+	var docLabels = fields[1].split(" ").map(getLabelID);
+	text = fields[2];
+
+	var tokens = [];
+	var rawTokens = text.toLowerCase().match(wordPattern);
+	if (rawTokens == null) { return; }
+
+	var wordID;
+
+	rawTokens.forEach(function (word) {
+		if (word !== "" && ! stopwords[word] && word.length > 2) {
+			wordID = getWordID(word);
+			wordSums[wordID] += 1;
+			var counts = wordLabelCounts[wordID];
+			
+			docLabels.forEach(function (labelID) {
+				if (! counts.hasOwnProperty(labelID)) {
+					counts[labelID] = 0;
+				}
+				counts[labelID] += 1;
+				labelSums[labelID] += 1;
+			});
+			tokens.push(wordID);
+		}
+	});
+
+	return { "originalOrder" : row, "id" : docID, "labels" : docLabels, "originalText" : text, "tokens" : tokens };
+};
+
+function getLabelID(label) {
+	if (! labelIDs.has(label)) {
+		var labelID = labels.length; labels.push(label);
+		labelIDs.set(label, labelID); labelSums[labelID] = 0;
+	}
+	
+	return labelIDs.get(label);
+}
+
+function getWordID(word) {
+	if (! wordIDs.has(word)) {
+		var wordID = words.length; words.push(word);
+		wordIDs.set(word, wordID); wordLabelCounts[wordID] = {};
+		wordSums[wordID] = 0;
+	}
+	
+	return wordIDs.get(word);
+}
+
+d3.text("yelp_phoenix_10k.txt", 
+function (error, text) {
+	console.log("got docs");
+	var start = +new Date();
+	documents = d3.tsv.parseRows(text, parseLine);
+	var end = +new Date();
+	console.log("parsed " + (end - start));
+
+	var label1 = getLabelID("5_star");
+	var label2 = getLabelID("1_star");
+
+	console.log(words);
+	var vocabSize = words.length;
+
+	var total1 = labelSums[label1] + smoothing * vocabSize;
+	var total2 = labelSums[label2] + smoothing * vocabSize;
+
+	var frequentWords = words.filter(function (w) {
+		wordID = getWordID(w);
+		return wordSums[wordID] > 100;
+	});
+
+	var wordGroup = svg.append("g");
+	var texts = wordGroup.selectAll("text").data(frequentWords);
+
+	texts.enter().append("text")
+	.attr("x", function(word) {
+		
+		var wordID = getWordID(word);
+		var counts = wordLabelCounts[wordID];
+
+		var n1 = smoothing;
+		
+		if (counts.hasOwnProperty(label1)) {
+			n1 += counts[label1];
+		}
+		
+		var n2 = smoothing;
+		if (counts.hasOwnProperty(label2)) {
+			n2 += counts[label2];
+		}
+
+		var p1 = n1 / total1;
+		var p2 = n2 / total2;
+		
+		return xScale(Math.log(p1 / p2));
+	})
+	.attr("y", function(word) { return yScale(wordSums[getWordID(word)]); })
+	.text(function (word) { return word; } );
+});
+
+
+</script>
+</body>
+</html>
